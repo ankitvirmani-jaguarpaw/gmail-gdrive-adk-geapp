@@ -131,7 +131,7 @@ vertexai.init(project="283243243997", location="us-central1")
 
 # Load deployed Agent Engine resource
 agent = vertexai.agent_engines.get(
-    "projects/283243243997/locations/us-central1/reasoningEngines/751619551677906944"
+    "projects/283243243997/locations/us-central1/reasoningEngines/2047458051564240896"
 )
 
 # Create managed session
