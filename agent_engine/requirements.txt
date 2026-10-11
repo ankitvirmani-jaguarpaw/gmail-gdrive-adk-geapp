@@ -1,0 +1,4 @@
+google-adk>=0.1.0
+google-genai>=1.0.0
+google-cloud-aiplatform>=1.75.0
+pypdf>=5.0.0
