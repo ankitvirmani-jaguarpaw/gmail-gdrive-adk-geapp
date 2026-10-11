@@ -461,5 +461,21 @@ Now, when any employee in your organization chats with Gemini Enterprise and ask
 | **`Error 400: redirect_uri missing`** | Created a Web Client instead of a Desktop client, or used deprecated `--no-browser` flag. | Use a Desktop App OAuth Client ID and authenticate via `login.py`. |
 | **`InsecureTransportError`** | `oauthlib` disallows `http://localhost` callbacks by default. | Set `os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"` in `login.py`. |
 | **`mTLS was requested...`** | Device/corporate certificates trigger mTLS on non-mTLS async session. | Set `GOOGLE_API_USE_MTLS_ENDPOINT="never"` and `GOOGLE_API_USE_CLIENT_CERTIFICATE="false"`. |
+
+
+**Summary of What is Covered in the Guide:**
+Google Cloud APIs to Enable: CLI commands to enable Gmail, Drive, Vertex AI, and MCP services on project 283243243997.
+
+OAuth Consent Screen: Step-by-step instructions to configure an Internal consent screen under your Workspace domain (virufy.org) to prevent app blocks.
+
+Credentials & Authentication: Instructions for generating Desktop OAuth credentials, the headless login.py copy-paste script, and generating token.json.
+
+Agent Code (agent.py): The complete, tested agent implementation with mTLS overrides, search_gmail_attachments, and save_attachment_to_drive.
+
+Local Test Runner (run_local.py): Script utilizing ADK's Runner and InMemorySessionService to stream agent reasoning and tool executions.
+
+Production Deployment (deploy.py): Instructions for deploying to Vertex AI Agent Engine (ReasoningEngine.create) and registering the agent within the Gemini Enterprise Admin Console with End-User Credential (EUC) delegation.
+
+Troubleshooting Reference: Solutions for mTLS conflicts, the Developer Preview gate, and parameter truncation issues.
 | **MCP Preview Gate (403)** | `gmailmcp.googleapis.com` execution requires Google Workspace Developer Preview approval. | Used native Gmail REST API tool calls in ADK, leveraging existing authorized scopes. |
 | **HTTP 400 on Attachment Download** | Attachment IDs are 1,000+ character hashes that get corrupted/truncated by LLM text generation. | Simplified tool parameters so LLM passes clean `message_id` and `filename`; Python resolves exact attachment bytes internally. |
