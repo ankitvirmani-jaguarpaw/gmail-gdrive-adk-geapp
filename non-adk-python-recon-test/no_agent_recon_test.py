@@ -20,7 +20,7 @@ os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
 
 # Import from agent (or agent_recon)
 try:
-    from agent import (
+    from no_agent_recon import (
         fetch_invoices_from_drive,
         generate_html_dashboard,
         get_today_coa_emails_and_attachments,
