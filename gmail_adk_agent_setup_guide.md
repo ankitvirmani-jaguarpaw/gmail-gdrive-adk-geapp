@@ -80,16 +80,19 @@ To prevent Google's **"This app is blocked"** security alert on corporate Worksp
 When running in Cloud Shell or remote Linux VMs, local browser servers cannot be reached directly without port forwarding. Use this copy-paste flow script to generate `token.json`:
 
 ```python
+import json
 import os
-# Allow HTTP loopback for local development
+
+# Allow HTTP for local testing/redirects (must be set before importing oauthlib)
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
-import json
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+# Added drive.readonly so the agent can read existing Drive folders and files
 SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.file",
 ]
 
@@ -113,23 +116,31 @@ print(auth_url)
 
 print("\n" + "=" * 60)
 print("STEP 2: Sign in as ankit.virmani@virufy.org and click Allow.")
-print("When you reach the 'This site can’t be reached' page, copy the address bar URL.")
+print("When you hit the 'site can’t be reached' page, copy the address bar URL.")
 print("=" * 60)
 
-redirect_response = input("\nSTEP 3: Paste the full URL from your browser address bar here:\n> ").strip()
+redirect_response = input(
+    "\nSTEP 3: Paste the full URL from your browser address bar here:\n> "
+).strip()
 
+# Replace https with http if needed to match the registered redirect_uri
 if redirect_response.startswith("https://localhost"):
-    redirect_response = redirect_response.replace("https://localhost", "http://localhost", 1)
+  redirect_response = redirect_response.replace(
+      "https://localhost", "http://localhost", 1
+  )
 
-# 3. Exchange authorization code for tokens
+# 3. Exchange the authorization code for tokens
 flow.fetch_token(authorization_response=redirect_response)
 creds = flow.credentials
 
 with open("token.json", "w") as f:
-    f.write(creds.to_json())
+  f.write(creds.to_json())
 
 print("\nAuthentication successful!")
-print("Token saved to token.json for ankit.virmani@virufy.org")
+print(
+    "Token saved to token.json for ankit.virmani@virufy.org with drive.readonly"
+    " access!"
+)
 ```
 
 ### Execution:
