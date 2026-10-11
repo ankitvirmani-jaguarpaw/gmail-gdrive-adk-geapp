@@ -67,28 +67,19 @@ Run this script to deploy without hardcoding project numbers, bucket names, or r
 
 ```bash
 # 1. Dynamically resolve GCP environment from active gcloud configuration
+# 1. Export standard GCP environment variables
 export PROJECT_ID=$(gcloud config get-value project)
-export PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-export REGION=$(gcloud config get-value compute/region 2>/dev/null || echo "us-central1")
-export STAGING_BUCKET="gs://${PROJECT_ID}-agent-engine-staging"
+export REGION="us-central1"
 
-echo "=== Deploying with Dynamic GCP Configuration ==="
-echo "Project ID:      ${PROJECT_ID}"
-echo "Project Number:  ${PROJECT_NUMBER}"
-echo "Region:          ${REGION}"
-echo "Staging Bucket:  ${STAGING_BUCKET}"
+export GOOGLE_CLOUD_PROJECT="${PROJECT_ID}"
+export CLOUDSDK_CORE_PROJECT="${PROJECT_ID}"
+export GOOGLE_CLOUD_LOCATION="${REGION}"
+export GOOGLE_CLOUD_REGION="${REGION}"
 
-# 2. Ensure staging bucket exists (idempotent)
-gcloud storage buckets create "${STAGING_BUCKET}" \
-  --project="${PROJECT_ID}" \
-  --location="${REGION}" \
-  --uniform-bucket-level-access 2>/dev/null || true
-
-# 3. Deploy package directly to Vertex AI Agent Engine
+# 2. Deploy without --staging_bucket
 adk deploy agent_engine \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
-  --staging_bucket="${STAGING_BUCKET}" \
   --display_name="Commodity Reconciliation Agent" \
   .
 ```
