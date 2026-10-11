@@ -153,7 +153,7 @@ python login.py
 
 ## 6. Agent Implementation (`agent.py`)
 
-This file contains the complete agent logic and tools. It works both locally (using `token.json`) and in Gemini Enterprise App:
+This file contains the complete agent logic and tools. It works both locally (using `token.json`) and in Gemini Enterprise App. This code just tests whether and how ADK connects with Gmail. Nothing else. 
 
 ```python
 import base64
