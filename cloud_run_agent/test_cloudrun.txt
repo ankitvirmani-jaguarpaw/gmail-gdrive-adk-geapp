@@ -1,0 +1,27 @@
+python3 -c "
+import requests
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+
+creds = Credentials.from_authorized_user_file('token.json')
+if creds.expired and creds.refresh_token:
+    creds.refresh(Request())
+    with open('token.json', 'w') as f:
+        f.write(creds.to_json())
+
+url = 'https://commodity-recon-agent-non-ge-v2-276490382325.us-central1.run.app/reconcile'
+payload = {
+    'folder_id': '1CcCuZaRp-2bGxRjtEElZ8mQYZy8qrM77',
+    'sender_email': 'ankit.virmani@virufy.org',
+    'subject_filter': 'Certificate of Analysis'
+}
+
+resp = requests.post(
+    url,
+    headers={'Authorization': f'Bearer {creds.token}', 'Content-Type': 'application/json'},
+    json=payload,
+    timeout=300
+)
+print('HTTP Status:', resp.status_code)
+print(resp.text)
+"
