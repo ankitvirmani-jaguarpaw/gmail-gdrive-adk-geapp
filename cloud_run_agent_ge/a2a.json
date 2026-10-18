@@ -1,0 +1,41 @@
+{
+  "protocolVersion": "0.3.0",
+  "name": "Commodity Trade Reconciliation Agent",
+  "description": "Autonomous 3-way reconciliation agent that audits supplier Certificates of Analysis (CoAs) in Gmail against settlement invoices in Google Drive, publishing an executive light-mode dashboard to GCS.",
+  "version": "1.0.0",
+  "url": "https://commodity-recon-agent-ge-276490382325.us-central1.run.app",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain"
+  ],
+  "skills": [
+    {
+      "id": "reconcile_commodities",
+      "name": "Commodity Trade Reconciliation",
+      "description": "Performs 3-way trade reconciliation audit between supplier Certificates of Analysis (CoAs) in Gmail and settlement invoices in Google Drive, publishing an executive light-mode dashboard.",
+      "tags": [
+        "reconciliation",
+        "commodities",
+        "cme",
+        "audit"
+      ],
+      "examples": [
+        "Reconcile my commodity trades",
+        "Run 3-way reconciliation between Gmail CoAs and Drive invoices",
+        "Audit incoming spot invoices and CoAs"
+      ],
+      "inputModes": [
+        "text/plain"
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
+    }
+  ]
+}
