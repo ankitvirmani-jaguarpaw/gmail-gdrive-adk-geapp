@@ -3,7 +3,7 @@
   "name": "Commodity Trade Reconciliation Agent",
   "description": "Autonomous 3-way reconciliation agent that audits supplier Certificates of Analysis (CoAs) in Gmail against settlement invoices in Google Drive, publishing an executive light-mode dashboard to GCS.",
   "version": "1.0.0",
-  "url": "https://commodity-recon-agent-ge-276490382325.us-central1.run.app",
+  "url": "https://commodity-recon-agent-ge-v2-276490382325.us-central1.run.app",
   "capabilities": {
     "streaming": false,
     "pushNotifications": false
