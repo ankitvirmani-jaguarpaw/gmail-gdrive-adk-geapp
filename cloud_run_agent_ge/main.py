@@ -2,10 +2,13 @@
 """Enterprise Commodity Trade Reconciliation Agent Service on Cloud Run.
 
 Full dual-protocol support:
-1. Native A2A (Agent-to-Agent) v0.3 protocol compliant with SendMessageResponse.
-2. REST POST /reconcile for direct CLI/curl testing and script pipelines.
-Dynamic natural-language filter extraction (subject, dates, folders), smart zero-match discovery,
-rich narrative chat summaries, and executive light-mode dashboard artifact publishing.
+1. Native A2A (Agent-to-Agent) v0.3 protocol compliant with SendMessageResponse (Gemini Enterprise).
+2. REST POST /reconcile for direct CLI/curl testing and automated scripts.
+
+100% Dynamic:
+- Arbitrary Gmail sender emails, subject keywords, and date boundaries
+- Arbitrary Google Drive folder IDs or URLs
+- Dynamic natural-language reconciliation focus instructions passed directly to Gemini
 """
 
 import base64
@@ -28,9 +31,12 @@ from google.genai import types
 from google.genai import Client as GenAIClient
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Commodity Reconciliation A2A Agent Service", version="16.0.0")
+app = FastAPI(title="Commodity Reconciliation Dynamic A2A Agent", version="17.0.0")
 
-DEFAULT_FOLDER_ID = "1tW3zXN0fTvVAioE6j6VMNAP0D3M2e7B8"
+DEFAULT_FOLDER_ID = "1CcCuZaRp-2bGxRjtEElZ8mQYZy8qrM77"
+DEFAULT_SENDER_EMAIL = "ankit.virmani@virufy.org"
+DEFAULT_SUBJECT_FILTER = "Certificate of Analysis"
+
 
 def get_active_project_id() -> str:
     """Discovers the active Google Cloud project dynamically."""
@@ -39,7 +45,7 @@ def get_active_project_id() -> str:
     try:
         req = urllib.request.Request(
             "http://metadata.google.internal/computeMetadata/v1/project/project-id",
-            headers={"Metadata-Flavor": "Google"}
+            headers={"Metadata-Flavor": "Google"},
         )
         with urllib.request.urlopen(req, timeout=1.5) as resp:
             return resp.read().decode().strip()
@@ -47,26 +53,35 @@ def get_active_project_id() -> str:
         pass
     return "gateway-everything"
 
-# --- Query Parameter Extraction Schema ---
-class ReconciliationQueryParams(BaseModel):
-    subject_filter: str = Field(
-        default="Certificate of Analysis",
-        description="Gmail subject filter keyword or phrase, e.g. 'Certificate of Analysis', 'CoA', 'Inspection'"
+
+# --- Fully Dynamic Extraction & Query Schemas ---
+class DynamicReconciliationParams(BaseModel):
+    sender_email: Optional[str] = Field(
+        default=DEFAULT_SENDER_EMAIL,
+        description="Sender email to filter Gmail messages (e.g. 'ankit.virmani@virufy.org', 'spotcall@cmegroup.com'). Set to null if not specified.",
+    )
+    subject_filter: Optional[str] = Field(
+        default=DEFAULT_SUBJECT_FILTER,
+        description="Subject keyword or phrase (e.g. 'Certificate of Analysis', 'COA', 'Inspection Report'). Set to null if not specified.",
     )
     date_after: Optional[str] = Field(
         default=None,
-        description="Filter emails received on or after this date in YYYY/MM/DD format"
+        description="Filter emails received on or after this date in YYYY/MM/DD format",
     )
     date_before: Optional[str] = Field(
         default=None,
-        description="Filter emails received on or before this date in YYYY/MM/DD format"
+        description="Filter emails received on or before this date in YYYY/MM/DD format",
     )
     folder_id: str = Field(
         default=DEFAULT_FOLDER_ID,
-        description="Google Drive Folder ID or URL containing settlement invoices"
+        description="Google Drive Folder ID or URL containing invoices",
+    )
+    recon_focus_prompt: Optional[str] = Field(
+        default=None,
+        description="Custom audit guidelines, commodity tolerances, or rules supplied by the user (e.g., 'Ensure box count is exact, allow 1% weight discrepancy').",
     )
 
-# --- Universal Pydantic Extraction Schemas ---
+
 class UniversalInvoiceLine(BaseModel):
     line_number: str = Field(description="Line item number, e.g. '1.1', '2.1'")
     commodity_description: str = Field(description="Product or commodity name")
@@ -75,10 +90,12 @@ class UniversalInvoiceLine(BaseModel):
     billed_net_weight: float = Field(description="Total billed net weight or volume as float")
     unit_of_measure: str = Field(default="lbs", description="Unit of measure (lbs, kg, MT)")
 
+
 class UniversalInvoiceDocument(BaseModel):
     is_invoice: bool = Field(description="True if this document is a billing/settlement invoice")
     invoice_number: Optional[str] = Field(default=None, description="Invoice reference number")
     line_items: List[UniversalInvoiceLine] = Field(default_factory=list, description="Itemized lines")
+
 
 class UniversalInspectionDocument(BaseModel):
     is_inspection_or_coa: bool = Field(description="True if this document is a Certificate of Analysis (CoA) or Manifest")
@@ -88,21 +105,25 @@ class UniversalInspectionDocument(BaseModel):
     certified_total_net_weight: float = Field(description="Total roll-up net weight across all sublots/pallets")
     unit_of_measure: str = Field(default="lbs", description="Unit of measure (lbs, kg, MT)")
 
+
 # --- Dynamic Parameter Parser from User Message ---
-def extract_query_parameters(user_text: str, client: GenAIClient) -> ReconciliationQueryParams:
+def extract_query_parameters(user_text: str, client: GenAIClient) -> DynamicReconciliationParams:
     if not user_text:
-        return ReconciliationQueryParams()
+        return DynamicReconciliationParams()
 
     prompt = (
-        f"Analyze the following user instruction to identify any specific filtering criteria for email attachments and invoices:\n"
+        f"You are the intent parser for an enterprise commodity trade auditor.\n"
+        f"Analyze this instruction to extract all target parameters:\n"
         f"Instruction: \"{user_text}\"\n\n"
-        f"Rules for date extraction:\n"
-        f"- If the user asks for a specific single date (e.g. 'for September 11th, 2026'), Gmail syntax requires a 1-day bounding box: "
-        f"set date_after to the day before ('2026/09/10') and date_before to the day after ('2026/09/12').\n"
-        f"- If the user asks for 'after <date>', set date_after in YYYY/MM/DD.\n"
-        f"- If the user asks for 'before <date>', set date_before in YYYY/MM/DD.\n"
-        f"- subject_filter: email subject phrase (default to 'Certificate of Analysis' if unspecified).\n"
-        f"- folder_id: Google Drive folder ID or folder URL (default to '{DEFAULT_FOLDER_ID}')."
+        f"Rules:\n"
+        f"- sender_email: Email address or domain to filter from (e.g. 'spotcall@cmegroup.com', 'ankit.virmani@virufy.org'). "
+        f"  If the user does not specify a sender, keep the default '{DEFAULT_SENDER_EMAIL}'.\n"
+        f"- subject_filter: Email subject phrase or keyword (e.g. 'Certificate of Analysis', 'COA', 'Inspection'). "
+        f"  If not specified, keep default '{DEFAULT_SUBJECT_FILTER}'.\n"
+        f"- Single dates (e.g. 'for September 11th, 2026'): set date_after to day before ('2026/09/10') and date_before to day after ('2026/09/12').\n"
+        f"- Range dates: parse into YYYY/MM/DD format for date_after / date_before.\n"
+        f"- folder_id: Drive folder ID or full URL. Extract only the alphanumeric ID. Default to '{DEFAULT_FOLDER_ID}'.\n"
+        f"- recon_focus_prompt: Extract any specific audit rules, weight tolerances, line items of interest, or verification checks stated by the user."
     )
     try:
         response = client.models.generate_content(
@@ -110,45 +131,52 @@ def extract_query_parameters(user_text: str, client: GenAIClient) -> Reconciliat
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=ReconciliationQueryParams,
+                response_schema=DynamicReconciliationParams,
                 temperature=0.0,
             ),
         )
-        params = ReconciliationQueryParams.model_validate_json(response.text)
+        params = DynamicReconciliationParams.model_validate_json(response.text)
         if "folders/" in params.folder_id:
             params.folder_id = params.folder_id.split("folders/")[1].split("?")[0].strip()
         return params
     except Exception as e:
-        print(f"[Query Extraction Note] Using defaults: {e}")
-        return ReconciliationQueryParams()
+        print(f"[Dynamic Parser Note] Using defaults: {e}")
+        return DynamicReconciliationParams()
+
 
 # --- Diagnostic Fallback: Find Available CoAs When Filter Misses ---
-def inspect_available_coas_in_inbox(user_token: str, subject_filter: str) -> list:
-    """Discovers what CoAs actually exist in the mailbox to give helpful feedback."""
-    search_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={urllib.parse.quote('has:attachment ' + subject_filter)}&maxResults=5"
+def inspect_available_coas_in_inbox(user_token: str, subject_filter: Optional[str] = None) -> list:
+    sub = subject_filter if subject_filter else "Certificate of Analysis"
+    search_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={urllib.parse.quote('has:attachment ' + sub)}&maxResults=5"
     headers = {"Authorization": f"Bearer {user_token}"}
     req = urllib.request.Request(search_url, headers=headers)
     found_summaries = []
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             messages = json.loads(resp.read().decode("utf-8")).get("messages", [])
         for m in messages[:3]:
-            d_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{m['id']}?format=metadata&metadataHeaders=Subject&metadataHeaders=Date"
-            with urllib.request.urlopen(urllib.request.Request(d_url, headers=headers)) as d_resp:
+            d_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{m['id']}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date"
+            with urllib.request.urlopen(urllib.request.Request(d_url, headers=headers), timeout=10) as d_resp:
                 d_data = json.loads(d_resp.read().decode("utf-8"))
                 headers_list = d_data.get("payload", {}).get("headers", [])
+                from_hdr = next((h["value"] for h in headers_list if h["name"].lower() == "from"), "Unknown Sender")
                 subj = next((h["value"] for h in headers_list if h["name"].lower() == "subject"), "No Subject")
                 dt = next((h["value"] for h in headers_list if h["name"].lower() == "date"), "Unknown Date")
-                found_summaries.append(f"\"{subj}\" (Date: {dt})")
+                found_summaries.append(f"From: {from_hdr} | Subject: \"{subj}\" (Date: {dt})")
     except Exception as e:
         print(f"[Inbox Discovery Note] {e}")
     return found_summaries
 
-# --- Deduplicated Document Ingestion with Dynamic Filters ---
-def fetch_coas_from_gmail(user_token: str, query_params: ReconciliationQueryParams, download_dir: str = "/tmp/recon_downloads") -> tuple:
+
+# --- Ingestion: Gmail Attachments with Dynamic Filters ---
+def fetch_coas_from_gmail(user_token: str, query_params: DynamicReconciliationParams, download_dir: str = "/tmp/recon_downloads") -> tuple:
     os.makedirs(download_dir, exist_ok=True)
 
-    query_parts = [f'subject:"{query_params.subject_filter}"', "has:attachment"]
+    query_parts = ["has:attachment"]
+    if query_params.sender_email:
+        query_parts.append(f'from:"{query_params.sender_email.strip()}"')
+    if query_params.subject_filter:
+        query_parts.append(f'subject:"{query_params.subject_filter.strip()}"')
     if query_params.date_after:
         query_parts.append(f"after:{query_params.date_after}")
     if query_params.date_before:
@@ -162,13 +190,12 @@ def fetch_coas_from_gmail(user_token: str, query_params: ReconciliationQueryPara
 
     req = urllib.request.Request(search_url, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             messages = json.loads(resp.read().decode("utf-8")).get("messages", [])
     except urllib.error.HTTPError as he:
         err_body = he.read().decode("utf-8")
         raise RuntimeError(f"Gmail API Error ({he.code}): {err_body}")
 
-    # If zero messages matched the filtered query, look up what CoAs DO exist in the inbox
     if not messages:
         available_coas = inspect_available_coas_in_inbox(user_token, query_params.subject_filter)
         return [], gmail_query, available_coas
@@ -180,7 +207,7 @@ def fetch_coas_from_gmail(user_token: str, query_params: ReconciliationQueryPara
         msg_id = item["id"]
         detail_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}?format=full"
         try:
-            with urllib.request.urlopen(urllib.request.Request(detail_url, headers=headers)) as d_resp:
+            with urllib.request.urlopen(urllib.request.Request(detail_url, headers=headers), timeout=15) as d_resp:
                 msg_data = json.loads(d_resp.read().decode("utf-8"))
 
             def walk_parts(payload):
@@ -199,7 +226,7 @@ def fetch_coas_from_gmail(user_token: str, query_params: ReconciliationQueryPara
                     raw_bytes = base64.urlsafe_b64decode(part["body"]["data"].encode("utf-8"))
                 elif att_id:
                     att_url = f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/attachments/{att_id}"
-                    with urllib.request.urlopen(urllib.request.Request(att_url, headers=headers)) as a_resp:
+                    with urllib.request.urlopen(urllib.request.Request(att_url, headers=headers), timeout=30) as a_resp:
                         raw_data = json.loads(a_resp.read().decode("utf-8")).get("data", "")
                         raw_bytes = base64.urlsafe_b64decode(raw_data.encode("utf-8"))
 
@@ -219,13 +246,15 @@ def fetch_coas_from_gmail(user_token: str, query_params: ReconciliationQueryPara
                         "path": dest,
                         "sha256": f_hash,
                         "size_bytes": len(raw_bytes),
-                        "source": "GMAIL_INBOX"
+                        "source": "GMAIL_INBOX",
                     })
         except Exception as e:
             print(f"[Gmail Parse Note] {msg_id}: {e}")
 
     return downloaded, gmail_query, []
 
+
+# --- Ingestion: Google Drive Invoices ---
 def fetch_invoices_from_drive(user_token: str, folder_id: str, download_dir: str = "/tmp/recon_invoices") -> list:
     os.makedirs(download_dir, exist_ok=True)
     query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
@@ -234,7 +263,7 @@ def fetch_invoices_from_drive(user_token: str, folder_id: str, download_dir: str
 
     req = urllib.request.Request(list_url, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             files = json.loads(resp.read().decode("utf-8")).get("files", [])
     except urllib.error.HTTPError as he:
         err_body = he.read().decode("utf-8")
@@ -248,7 +277,7 @@ def fetch_invoices_from_drive(user_token: str, folder_id: str, download_dir: str
         fid = f["id"]
         dl_url = f"https://www.googleapis.com/drive/v3/files/{fid}?alt=media&supportsAllDrives=true"
         try:
-            with urllib.request.urlopen(urllib.request.Request(dl_url, headers=headers)) as dl_resp:
+            with urllib.request.urlopen(urllib.request.Request(dl_url, headers=headers), timeout=30) as dl_resp:
                 content = dl_resp.read()
 
             f_hash = hashlib.sha256(content).hexdigest()
@@ -267,23 +296,25 @@ def fetch_invoices_from_drive(user_token: str, folder_id: str, download_dir: str
                 "sha256": f_hash,
                 "size_bytes": len(content),
                 "source": "GOOGLE_DRIVE_FOLDER",
-                "drive_file_id": fid
+                "drive_file_id": fid,
             })
         except Exception as e:
             print(f"[Drive Download Note] {fname}: {e}")
 
     return downloaded
 
-# --- Universal Multimodal Extraction ---
-def parse_document_universal(client: GenAIClient, pdf_path: str, doc_role: str):
+
+# --- Universal Multimodal Extraction with Custom Directives ---
+def parse_document_universal(client: GenAIClient, pdf_path: str, doc_role: str, custom_focus: Optional[str] = None):
     with open(pdf_path, "rb") as f:
         pdf_bytes = f.read()
 
     doc_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+    focus_clause = f"\nUser-Specific Focus Guidelines:\n{custom_focus}\n" if custom_focus else ""
 
     if doc_role == "invoice":
         prompt = (
-            "Analyze this commercial settlement or trade invoice. "
+            f"Analyze this commercial settlement or trade invoice.{focus_clause}"
             "Extract all billed line items including: line number, exact commodity description, lot or PO reference, "
             "billed quantity/box count, and billed net weight in lbs. "
             "Ensure lot_or_po_identifier is extracted accurately. "
@@ -301,7 +332,7 @@ def parse_document_universal(client: GenAIClient, pdf_path: str, doc_role: str):
         return UniversalInvoiceDocument.model_validate_json(response.text)
     else:
         prompt = (
-            "Analyze this Certificate of Analysis (CoA), Manifest, or Inspection Report. "
+            f"Analyze this Certificate of Analysis (CoA), Manifest, or Inspection Report.{focus_clause}"
             "Extract the primary certified Purchase Order (PO) number, Release reference, or Lot identifier. "
             "Calculate or sum the grand total certified package/unit count across all pallets and sublots. "
             "Calculate or sum the grand total certified net weight in lbs across all pallets and sublots. "
@@ -318,14 +349,20 @@ def parse_document_universal(client: GenAIClient, pdf_path: str, doc_role: str):
         )
         return UniversalInspectionDocument.model_validate_json(response.text)
 
+
 # --- 3-Way Reconciliation Math Engine ---
-def execute_universal_audit(coa_files: list, invoice_files: list, ai_client: GenAIClient) -> dict:
+def execute_universal_audit(
+    coa_files: list,
+    invoice_files: list,
+    ai_client: GenAIClient,
+    custom_focus: Optional[str] = None,
+) -> dict:
     invoice_records = []
     seen_invoice_keys = set()
 
     for inv in invoice_files:
         try:
-            parsed = parse_document_universal(ai_client, inv["path"], doc_role="invoice")
+            parsed = parse_document_universal(ai_client, inv["path"], doc_role="invoice", custom_focus=custom_focus)
             if not parsed.is_invoice or not parsed.line_items:
                 continue
 
@@ -356,7 +393,7 @@ def execute_universal_audit(coa_files: list, invoice_files: list, ai_client: Gen
 
     for coa in coa_files:
         try:
-            parsed = parse_document_universal(ai_client, coa["path"], doc_role="inspection")
+            parsed = parse_document_universal(ai_client, coa["path"], doc_role="inspection", custom_focus=custom_focus)
             if not parsed.is_inspection_or_coa or not parsed.certified_lot_or_po:
                 continue
 
@@ -388,7 +425,7 @@ def execute_universal_audit(coa_files: list, invoice_files: list, ai_client: Gen
             (c for c in coa_records if clean_inv == re.sub(r"[^a-zA-Z0-9]", "", c["po_number"]).lower()
              or clean_inv in re.sub(r"[^a-zA-Z0-9]", "", c["po_number"]).lower()
              or re.sub(r"[^a-zA-Z0-9]", "", c["po_number"]).lower() in clean_inv),
-            None
+            None,
         )
 
         if not matched_coa:
@@ -433,7 +470,7 @@ def execute_universal_audit(coa_files: list, invoice_files: list, ai_client: Gen
                 "wt_delta": 0.0,
                 "uom": inv["uom"],
                 "status": "MATCH",
-                "reason": "Exact parity across PO/Lot, unit quantity, and certified net weight.",
+                "reason": "Exact mathematical parity across PO/Lot, unit quantity, and certified net weight.",
             })
         else:
             issues = []
@@ -477,8 +514,9 @@ def execute_universal_audit(coa_files: list, invoice_files: list, ai_client: Gen
         "details": results,
     }
 
+
 # --- Executive Chat Narrative Builder ---
-def build_executive_chat_narrative(recon_data: dict, gcs_url: str, params: ReconciliationQueryParams) -> str:
+def build_executive_chat_narrative(recon_data: dict, gcs_url: str, params: DynamicReconciliationParams) -> str:
     total = recon_data.get("total_lines_audited", 0)
     matches = recon_data.get("matches_count", 0)
     discrepancies = recon_data.get("discrepancies_count", 0)
@@ -486,13 +524,18 @@ def build_executive_chat_narrative(recon_data: dict, gcs_url: str, params: Recon
     total_wt = recon_data.get("total_audited_wt", 0.0)
     net_var = recon_data.get("total_variance_wt", 0.0)
 
-    # Filter details
-    filter_desc = f"- **Gmail Search Filter**: `subject:\"{params.subject_filter}\"`"
+    filter_desc = []
+    if params.sender_email:
+        filter_desc.append(f"**Sender**: `{params.sender_email}`")
+    if params.subject_filter:
+        filter_desc.append(f"**Subject**: `{params.subject_filter}`")
     if params.date_after:
-        filter_desc += f" `after:{params.date_after}`"
+        filter_desc.append(f"**After**: `{params.date_after}`")
     if params.date_before:
-        filter_desc += f" `before:{params.date_before}`"
-    filter_desc += f"\n- **Drive Folder Source**: `{params.folder_id}`"
+        filter_desc.append(f"**Before**: `{params.date_before}`")
+    filter_desc.append(f"**Drive Folder**: `{params.folder_id}`")
+    if params.recon_focus_prompt:
+        filter_desc.append(f"**Custom Focus Rules**: *\"{params.recon_focus_prompt}\"*")
 
     verdict = "**CLEAN AUDIT** (100% Parity)" if discrepancies == 0 else f"**DISCREPANCIES DETECTED** ({discrepancies} variance{'s' if discrepancies > 1 else ''})"
 
@@ -505,7 +548,7 @@ def build_executive_chat_narrative(recon_data: dict, gcs_url: str, params: Recon
         f"- **Discrepancies**: **{discrepancies}** lines requiring settlement review\n"
         f"- **Billed Volume**: **{total_wt:,.2f} lbs**\n"
         f"- **Net Variance**: **{net_var:+,.2f} lbs**\n\n"
-        f"**Audit Scope & Parameters Applied**:\n{filter_desc}\n\n"
+        f"**Audit Scope & Parameters Applied**:\n- " + "\n- ".join(filter_desc) + "\n\n"
         f"**Itemized Audit Breakdown**:\n\n"
         f"| Commodity | Line | Billed Lot | Certified PO | Billed Qty | CoA Qty | Variance | Status |\n"
         f"| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
@@ -525,6 +568,7 @@ def build_executive_chat_narrative(recon_data: dict, gcs_url: str, params: Recon
 
     narrative += f"\n**Interactive Executive Dashboard**:\n[View Light-Mode Audit Dashboard]({gcs_url})\n"
     return narrative
+
 
 # --- Light-Mode Executive Dashboard Builder ---
 def build_light_mode_html(recon_data: dict, coa_proof: list, invoice_proof: list) -> str:
@@ -742,6 +786,7 @@ def build_light_mode_html(recon_data: dict, coa_proof: list, invoice_proof: list
 </body>
 </html>"""
 
+
 # --- Publish to GCS ---
 def upload_dashboard_to_gcs(html_content: str, bucket_name: str, object_name: str = "reconciliation_dashboard.html") -> dict:
     project_id = get_active_project_id()
@@ -766,18 +811,19 @@ def upload_dashboard_to_gcs(html_content: str, bucket_name: str, object_name: st
 
     return {"web_url": web_url, "console_url": console_url, "gcs_uri": f"gs://{bucket_name}/{object_name}"}
 
-# --- A2A Agent Card Discovery with Dynamic Capability Parameters ---
+
+# --- A2A Agent Card Discovery ---
 def generate_agent_card(request: Request) -> dict:
     host_url = str(request.base_url).rstrip("/")
     return {
         "protocolVersion": "0.3.0",
         "name": "Commodity Trade Reconciliation Agent",
         "description": "Autonomous 3-way reconciliation agent that audits supplier Certificates of Analysis (CoAs) in Gmail against settlement invoices in Google Drive, publishing an executive light-mode dashboard to GCS.",
-        "version": "2.1.0",
+        "version": "17.0.0",
         "url": host_url,
         "capabilities": {
             "streaming": False,
-            "pushNotifications": False
+            "pushNotifications": False,
         },
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
@@ -785,46 +831,52 @@ def generate_agent_card(request: Request) -> dict:
             {
                 "id": "reconcile_commodities",
                 "name": "Commodity Trade Reconciliation",
-                "description": "Performs 3-way trade reconciliation audit between supplier Certificates of Analysis (CoAs) in Gmail and settlement invoices in Google Drive. Supports dynamic email subject keywords, date ranges, and Google Drive folder IDs.",
+                "description": "Performs 3-way trade reconciliation audit between supplier Certificates of Analysis (CoAs) in Gmail and settlement invoices in Google Drive. Supports dynamic sender emails, subjects, date bounds, folder IDs, and audit focus prompts.",
                 "tags": ["reconciliation", "commodities", "cme", "audit", "gmail", "drive"],
                 "examples": [
                     "Reconcile my commodity trades",
-                    "Audit trades with subject 'Inspection Report' from last month",
-                    "Run reconciliation for emails after 2026/09/01 using folder 1tW3zXN0fTvVAioE6j6VMNAP0D3M2e7B8",
-                    "Reconcile incoming CoAs and spot invoices"
+                    "Audit emails from spotcall@cmegroup.com with subject 'Inspection Report' from last month",
+                    "Reconcile trades from ankit.virmani@virufy.org in folder 1CcCuZaRp-2bGxRjtEElZ8mQYZy8qrM77, flag any lot with weight variance over 1.0 lb",
                 ],
                 "inputModes": ["text/plain"],
-                "outputModes": ["text/plain"]
+                "outputModes": ["text/plain"],
             }
-        ]
+        ],
     }
+
 
 @app.get("/.well-known/agent.json")
 @app.get("/.well-known/agent-card.json")
 def get_a2a_agent_card(request: Request):
     return JSONResponse(content=generate_agent_card(request))
 
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "commodity-reconciliation-agent"}
 
+
 # --- Core Pipeline Execution ---
-def run_pipeline(token: str, query_params: ReconciliationQueryParams, ai_client: GenAIClient):
+def run_pipeline(token: str, query_params: DynamicReconciliationParams, ai_client: GenAIClient):
     coas, actual_query, available_in_inbox = fetch_coas_from_gmail(user_token=token, query_params=query_params)
     if not coas:
-        # Return structured diagnostic info instead of crashing
         return {
             "zero_matches": True,
             "query_used": actual_query,
             "available_coas": available_in_inbox,
-            "params": query_params
+            "params": query_params,
         }
 
     invoices = fetch_invoices_from_drive(user_token=token, folder_id=query_params.folder_id)
     if not invoices:
-        raise ValueError(f"Zero invoice PDFs downloaded from Drive folder {query_params.folder_id}.")
+        raise ValueError(f"Zero invoice PDFs downloaded from Drive folder '{query_params.folder_id}'. Check folder permissions.")
 
-    recon_data = execute_universal_audit(coas, invoices, ai_client)
+    recon_data = execute_universal_audit(
+        coa_files=coas,
+        invoice_files=invoices,
+        ai_client=ai_client,
+        custom_focus=query_params.recon_focus_prompt,
+    )
     project_id = get_active_project_id()
     bucket_name = f"cme-recon-dashboards-{project_id}"
     html_content = build_light_mode_html(recon_data, coas, invoices)
@@ -835,10 +887,11 @@ def run_pipeline(token: str, query_params: ReconciliationQueryParams, ai_client:
         "coas": coas,
         "invoices": invoices,
         "recon_data": recon_data,
-        "gcs_info": gcs_info
+        "gcs_info": gcs_info,
     }
 
-# --- Protocol 1: A2A v0.3 Protocol Spec Handler ---
+
+# --- Protocol 1: A2A v0.3 Protocol Handler (Gemini Enterprise) ---
 @app.post("/")
 @app.post("/tasks/send")
 @app.post("/message/send")
@@ -860,7 +913,6 @@ async def handle_a2a_rpc(
     task_id = params.get("id", str(uuid.uuid4()))
     context_id = params.get("contextId") or params.get("context_id") or str(uuid.uuid4())
 
-    # Multi-header token extraction
     candidate_tokens = []
     if x_user_token:
         candidate_tokens.append(("x_user_token", x_user_token))
@@ -876,14 +928,13 @@ async def handle_a2a_rpc(
         candidate_tokens.append(("body.context.token", ctx_creds["token"]))
 
     token = None
-    for src, t in candidate_tokens:
+    for _, t in candidate_tokens:
         if t and t.startswith("ya29."):
             token = t
             break
     if not token and candidate_tokens:
         token = candidate_tokens[0][1]
 
-    # Extract user message text
     user_text = ""
     parts = params.get("message", {}).get("parts", [])
     for p in parts:
@@ -894,7 +945,6 @@ async def handle_a2a_rpc(
 
     user_text_clean = user_text.strip().lower()
 
-    # Spec-compliant A2A v0.3 Task builder
     def build_a2a_task_response(state: str, text_content: str, artifacts: list = None) -> JSONResponse:
         msg_id = str(uuid.uuid4())
         msg_obj = {
@@ -902,12 +952,7 @@ async def handle_a2a_rpc(
             "messageId": msg_id,
             "message_id": msg_id,
             "role": "agent",
-            "parts": [
-                {
-                    "kind": "text",
-                    "text": text_content
-                }
-            ]
+            "parts": [{"kind": "text", "text": text_content}],
         }
 
         formatted_artifacts = []
@@ -919,7 +964,7 @@ async def handle_a2a_rpc(
                     "artifact_id": art_id,
                     "name": art.get("name", "reconciliation_dashboard"),
                     "description": "Executive Commodity Trade Reconciliation Dashboard",
-                    "parts": [{"kind": "text", "text": art.get("url", "")}]
+                    "parts": [{"kind": "text", "text": art.get("url", "")}],
                 })
 
         return JSONResponse(content={
@@ -930,33 +975,30 @@ async def handle_a2a_rpc(
                 "id": task_id,
                 "contextId": context_id,
                 "context_id": context_id,
-                "status": {
-                    "state": state,
-                    "message": msg_obj
-                },
+                "status": {"state": state, "message": msg_obj},
                 "history": [msg_obj],
-                "artifacts": formatted_artifacts
-            }
+                "artifacts": formatted_artifacts,
+            },
         })
 
     # Conversational routing
     if not user_text_clean or any(g in user_text_clean for g in ["hi", "hello", "hey", "how are you", "help", "who are you"]):
         greeting = (
             "Hello! I am your autonomous **Commodity Trade Reconciliation Agent**.\n\n"
-            "I perform a 3-way audit between supplier **Certificates of Analysis (CoAs)** in Gmail and **Invoices** in Google Drive.\n\n"
-            "**Supported Queries & Custom Parameters**:\n"
-            "- *\"Reconcile my commodity trades\"* (audits all available CoAs and invoices)\n"
-            "- *\"Reconcile shipments with subject 'Inspection Report'\"*\n"
-            "- *\"Audit trades for October 11th, 2026\"*\n"
-            "- *\"Reconcile invoices in Drive folder `<folder_id>`\"*\n\n"
-            "How can I help you reconcile today?"
+            "I execute dynamic audits between supplier **Certificates of Analysis (CoAs)** in Gmail and **Invoices** in Google Drive.\n\n"
+            "**Supported Natural Language Queries**:\n"
+            "- *\"Reconcile my commodity trades\"*\n"
+            "- *\"Audit emails from spotcall@cmegroup.com received after 2026/09/01\"*\n"
+            "- *\"Reconcile trades using Drive folder `<folder_id_or_url>` with subject 'Quality Assay'\"*\n"
+            "- *\"Reconcile trades and flag any line where weight difference exceeds 0.25 lbs\"*\n\n"
+            "How can I assist you with your audit today?"
         )
         return build_a2a_task_response(state="completed", text_content=greeting)
 
     if not token:
         return build_a2a_task_response(
             state="failed",
-            text_content="Error: Missing Google Workspace OAuth authorization token to access your Gmail and Google Drive."
+            text_content="Error: Missing Google Workspace OAuth token to access Gmail and Google Drive.",
         )
 
     try:
@@ -965,23 +1007,21 @@ async def handle_a2a_rpc(
         ai_client = GenAIClient(vertexai=True, project=project_id, location="us-central1")
 
         query_params = extract_query_parameters(user_text=user_text, client=ai_client)
-
         data = run_pipeline(token=token, query_params=query_params, ai_client=ai_client)
 
-        # Handle zero matching emails gracefully with diagnostic feedback
         if data.get("zero_matches"):
             available_list = data.get("available_coas", [])
             avail_msg = ""
             if available_list:
-                avail_msg = "\n\n**Found other recent Certificate of Analysis emails in your inbox**:\n" + "\n".join(f"- {c}" for c in available_list)
-                avail_msg += "\n\nTo audit all available trades, simply prompt:\n> *\"Reconcile my commodity trades\"*"
+                avail_msg = "\n\n**Found other recent emails with attachments**:\n" + "\n".join(f"- {c}" for c in available_list)
             else:
-                avail_msg = "\n\nNo Certificate of Analysis emails with attachments were found in your inbox."
+                avail_msg = "\n\nNo attachment emails were found in your inbox."
 
             zero_msg = (
                 f"### No Matching Documents Found\n\n"
-                f"I searched your Gmail using query: `{data['query_used']}` but found **0 matching emails** with attachments."
-                f"{avail_msg}"
+                f"I queried Gmail using: `{data['query_used']}` but found **0 matching emails**.\n"
+                f"{avail_msg}\n\n"
+                f"Try adjusting your sender or subject query, or prompt:\n> *\"Reconcile all commodity trades\"*"
             )
             return build_a2a_task_response(state="completed", text_content=zero_msg)
 
@@ -991,28 +1031,26 @@ async def handle_a2a_rpc(
         chat_narrative = build_executive_chat_narrative(
             recon_data=recon,
             gcs_url=gcs["web_url"],
-            params=query_params
+            params=query_params,
         )
 
         return build_a2a_task_response(
             state="completed",
             text_content=chat_narrative,
-            artifacts=[{"name": "reconciliation_dashboard", "url": gcs["web_url"]}]
+            artifacts=[{"name": "reconciliation_dashboard", "url": gcs["web_url"]}],
         )
     except Exception as e:
         print("[A2A Exception Traceback]:")
         traceback.print_exc()
         return build_a2a_task_response(state="failed", text_content=f"Audit execution issue: {str(e)}")
 
-# --- Protocol 2: REST POST /reconcile ---
+
+# --- Protocol 2: Dynamic REST POST /reconcile ---
 @app.post("/reconcile")
 def reconcile_rest(
+    payload: DynamicReconciliationParams = DynamicReconciliationParams(),
     authorization: Optional[str] = Header(None),
     x_user_token: Optional[str] = Header(None),
-    subject_filter: str = "Certificate of Analysis",
-    date_after: Optional[str] = None,
-    date_before: Optional[str] = None,
-    folder_id: str = DEFAULT_FOLDER_ID,
 ):
     token = x_user_token
     if not token and authorization:
@@ -1021,25 +1059,24 @@ def reconcile_rest(
     if not token:
         raise HTTPException(status_code=401, detail="Missing required authorization token.")
 
-    query_params = ReconciliationQueryParams(
-        subject_filter=subject_filter,
-        date_after=date_after,
-        date_before=date_before,
-        folder_id=folder_id
-    )
+    if "folders/" in payload.folder_id:
+        payload.folder_id = payload.folder_id.split("folders/")[1].split("?")[0].strip()
 
     project_id = get_active_project_id()
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
     ai_client = GenAIClient(vertexai=True, project=project_id, location="us-central1")
 
-    data = run_pipeline(token=token, query_params=query_params, ai_client=ai_client)
+    data = run_pipeline(token=token, query_params=payload, ai_client=ai_client)
 
     if data.get("zero_matches"):
-        return JSONResponse(content={
-            "status": "warning",
-            "message": f"Zero messages matched query: {data['query_used']}",
-            "available_coas": data.get("available_coas", [])
-        })
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "warning",
+                "message": f"Zero messages matched query: {data['query_used']}",
+                "available_coas": data.get("available_coas", []),
+            },
+        )
 
     recon_data = data["recon_data"]
     coas = data["coas"]
@@ -1051,7 +1088,7 @@ def reconcile_rest(
         "audit_evidence_provenance": {
             "unique_coas_ingested": len(coas),
             "unique_invoices_ingested": len(invoices),
-            "applied_filters": query_params.model_dump(),
+            "applied_filters": payload.model_dump(),
             "deduplicated_coas": [{"filename": c["filename"], "sha256": c["sha256"][:16], "bytes": c["size_bytes"]} for c in coas],
             "deduplicated_invoices": [{"filename": i["filename"], "sha256": i["sha256"][:16], "bytes": i["size_bytes"]} for i in invoices],
         },
